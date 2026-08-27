@@ -1,0 +1,57 @@
+@import "tailwindcss";
+
+:root {
+  --background: #fafafa;
+  --foreground: #171717;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-hanzi: var(--font-geist-sans), "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  --font-mono: var(--font-geist-mono);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #09090b;
+    --foreground: #ededed;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+}
+
+.font-hanzi {
+  font-family: var(--font-hanzi);
+}
+
+ruby.hz-word {
+  ruby-align: center;
+}
+
+ruby.hz-word rt {
+  user-select: none;
+  -webkit-user-select: none;
+  pointer-events: none;
+  font-size: 0.8rem;
+  line-height: 1.1;
+  letter-spacing: 0;
+  color: rgb(113 113 122);
+  padding-bottom: 0.15rem;
+}
+
+.dark ruby.hz-word rt,
+ruby.hz-word rt {
+  color: rgb(161 161 170);
+}
+
+@media (prefers-color-scheme: light) {
+  ruby.hz-word rt {
+    color: rgb(113 113 122);
+  }
+}
