@@ -74,7 +74,7 @@ export default function SettingsPage() {
     <main className="max-w-2xl w-full mx-auto px-4 py-8">
       <h1 className="text-lg font-semibold mb-1">设置 Settings</h1>
       <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-6">
-        Configure any OpenAI-compatible API for sentence translation
+        Configure any OpenAI-compatible API for contextual reading analysis
         (OpenAI, DeepSeek, BytePlus Ark, Ollama, …). Your key is stored locally
         and never leaves this machine except to call the provider.
       </p>

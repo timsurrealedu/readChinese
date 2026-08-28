@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import type { LookupResult } from "@/lib/cedict";
 import { getParticleNote } from "@/lib/particles";
+import type { ParagraphReadingAnalysis, ReadingSegment } from "@/lib/reader-analysis";
 
 export interface ReaderSegment {
   para: number;
@@ -25,6 +26,9 @@ interface Props {
 interface Selection {
   surface: string;
   pinyin: string | null;
+  contextualGloss: string | null;
+  sourceSentence?: string;
+  contextual: boolean;
 }
 
 interface NgramCand {
@@ -86,10 +90,28 @@ function toneOf(syllable: string): number {
   return 0;
 }
 
-const TONE_SYMBOLS = ["", "\u02C9", "\u02CA", "\u02C7", "\u0060"];
+const TONE_PATHS = ["", "M2 3 H26", "M2 12 L26 2", "M2 3 Q9 14 15 10 Q21 6 26 2", "M2 2 L26 12"];
 
-function toneLineSymbol(syllable: string): string {
-  return TONE_SYMBOLS[toneOf(syllable)];
+function ToneContour({ syllable }: { syllable: string }) {
+  const path = TONE_PATHS[toneOf(syllable)];
+  if (!path) return <span className="inline-block w-7">&nbsp;</span>;
+
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 28 14"
+      className="inline-block h-4 w-7 overflow-visible text-zinc-700 dark:text-zinc-200"
+    >
+      <path
+        d={path}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2.75"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
 }
 
 export default function Reader({
@@ -114,12 +136,19 @@ export default function Reader({
   const [examples, setExamples] = useState<ExampleItem[] | null>(null);
   const [loadingExamples, setLoadingExamples] = useState(false);
   const [exampleError, setExampleError] = useState<string | null>(null);
+  const [analyses, setAnalyses] = useState<Record<number, ParagraphReadingAnalysis>>({});
+  const [analysisStatus, setAnalysisStatus] = useState<Record<number, "loading" | "error">>({});
+  const [needsApiKey, setNeedsApiKey] = useState(false);
+  const [paragraphTranslations, setParagraphTranslations] = useState<Record<number, string>>({});
+  const [paragraphTranslationStatus, setParagraphTranslationStatus] = useState<Record<number, "loading" | "error">>({});
   const [converter, setConverter] = useState<
     ((s: string) => string) | null
   >(null);
   const sheetRef = useRef<HTMLDivElement | null>(null);
   const reqIdRef = useRef(0);
   const translationCacheRef = useRef(new Map<string, string>());
+  const startedAnalysisRef = useRef(new Set<number>());
+  const analysisUnavailableRef = useRef(false);
 
   useEffect(() => {
     let raw: string | null = null;
@@ -168,15 +197,92 @@ export default function Reader({
 
   const knownSet = useMemo(() => new Set(knownChars), [knownChars]);
 
-  const paragraphs = useMemo(() => {
+  const fallbackParagraphs = useMemo(() => {
     const map = new Map<number, ReaderSegment[]>();
     for (const s of segments) {
       const list = map.get(s.para) ?? [];
       list.push(s);
       map.set(s.para, list);
     }
-    return [...map.entries()].sort((a, b) => a[0] - b[0]).map(([, list]) => list);
+    return map;
   }, [segments]);
+
+  const bodyParagraphs = useMemo(() => body.split(/\r?\n/), [body]);
+
+  async function loadAnalysis(paragraph: number) {
+    if (analysisUnavailableRef.current || startedAnalysisRef.current.has(paragraph)) return;
+    startedAnalysisRef.current.add(paragraph);
+    setAnalysisStatus((state) => ({ ...state, [paragraph]: "loading" }));
+    try {
+      const response = await fetch(`/api/texts/${id}/analysis`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paragraph, kind: "reading" }),
+      });
+      const data = await response.json() as ParagraphReadingAnalysis & { error?: string; code?: string };
+      if (!response.ok) {
+        if (data.code === "API_KEY_REQUIRED") {
+          analysisUnavailableRef.current = true;
+          setNeedsApiKey(true);
+        }
+        throw new Error(data.error ?? `HTTP ${response.status}`);
+      }
+      setAnalyses((state) => ({ ...state, [paragraph]: data }));
+      setAnalysisStatus((state) => {
+        const next = { ...state };
+        delete next[paragraph];
+        return next;
+      });
+    } catch {
+      setAnalysisStatus((state) => ({ ...state, [paragraph]: "error" }));
+    }
+  }
+
+  useEffect(() => {
+    const queue = bodyParagraphs.map((source, paragraph) => ({ source, paragraph })).filter(({ source }) => source.trim());
+    let cursor = 0;
+    async function worker() {
+      while (cursor < queue.length) {
+        const { paragraph } = queue[cursor++];
+        await loadAnalysis(paragraph);
+      }
+    }
+    void Promise.all([worker(), worker()]);
+    // The text id and body define this one-shot queue.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, body]);
+
+  function retryAnalysis(paragraph: number) {
+    analysisUnavailableRef.current = false;
+    setNeedsApiKey(false);
+    startedAnalysisRef.current.delete(paragraph);
+    void loadAnalysis(paragraph);
+  }
+
+  async function loadParagraphTranslation(paragraph: number) {
+    if (paragraphTranslations[paragraph] || paragraphTranslationStatus[paragraph] === "loading") return;
+    setParagraphTranslationStatus((state) => ({ ...state, [paragraph]: "loading" }));
+    try {
+      const response = await fetch(`/api/texts/${id}/analysis`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paragraph, kind: "paragraph_translation" }),
+      });
+      const data = await response.json() as { translation?: string; error?: string; code?: string };
+      if (!response.ok || !data.translation) {
+        if (data.code === "API_KEY_REQUIRED") setNeedsApiKey(true);
+        throw new Error(data.error ?? `HTTP ${response.status}`);
+      }
+      setParagraphTranslations((state) => ({ ...state, [paragraph]: data.translation as string }));
+      setParagraphTranslationStatus((state) => {
+        const next = { ...state };
+        delete next[paragraph];
+        return next;
+      });
+    } catch {
+      setParagraphTranslationStatus((state) => ({ ...state, [paragraph]: "error" }));
+    }
+  }
 
   function display(s: string): string {
     return prefs.traditional && converter ? converter(s) : s;
@@ -192,9 +298,9 @@ export default function Reader({
     return hasHanzi;
   }
 
-  async function selectWord(seg: ReaderSegment) {
+  async function selectWord(seg: ReaderSegment, contextualGloss: string | null = null, sourceSentence?: string) {
     const reqId = ++reqIdRef.current;
-    const sel: Selection = { surface: seg.surface, pinyin: seg.pinyin };
+    const sel: Selection = { surface: seg.surface, pinyin: seg.pinyin, contextualGloss, sourceSentence, contextual: contextualGloss !== null };
     setSelection(sel);
     setCurrentQ(sel.surface);
     setLookup(null);
@@ -208,12 +314,14 @@ export default function Reader({
     setExampleError(null);
     try {
       const res = await fetch(
-        `/api/lookup?w=${encodeURIComponent(sel.surface)}&t=${id}&p=${seg.para}&s=${seg.seq}`
+        contextualGloss !== null
+          ? `/api/lookup?w=${encodeURIComponent(sel.surface)}`
+          : `/api/lookup?w=${encodeURIComponent(sel.surface)}&t=${id}&p=${seg.para}&s=${seg.seq}`
       );
       const data = (await res.json()) as LookupResult;
       if (reqIdRef.current === reqId) {
         setLookup(data);
-        if (data.ngrams) setCtxNgrams(data.ngrams);
+        if (data.ngrams && contextualGloss === null) setCtxNgrams(data.ngrams);
       }
     } catch {
       if (reqIdRef.current === reqId)
@@ -270,7 +378,7 @@ export default function Reader({
 
   async function translateSentence() {
     if (!selection) return;
-    const sentence = findSentenceFor(selection.surface);
+    const sentence = selection.sourceSentence?.trim() || findSentenceFor(selection.surface);
     if (!sentence) return;
 
     const cachedT = translationCacheRef.current.get(sentence);
@@ -313,6 +421,10 @@ export default function Reader({
   }, []);
 
   useEffect(() => {
+    if (selection) sheetRef.current?.focus();
+  }, [selection]);
+
+  useEffect(() => {
     const tracked = sessionStorage.getItem(`rc-tracked-${id}`);
     if (tracked) return;
     fetch("/api/progress", {
@@ -327,7 +439,7 @@ export default function Reader({
   async function saveToReview() {
     if (!selection) return;
     const word = currentQ || selection.surface;
-    const sentence = findSentenceFor(word);
+    const sentence = selection.sourceSentence?.trim() || findSentenceFor(word);
     await fetch("/api/srs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -352,9 +464,12 @@ export default function Reader({
         .trim()
         .split(/\s+/)
         .map((syl, i) => (
-          <span key={i} className="tracking-widest">
+          <span
+            key={i}
+            className="inline-flex align-middle"
+          >
             {i > 0 ? "\u2009" : ""}
-            {toneLineSymbol(syl)}
+            <ToneContour syllable={syl} />
           </span>
         ));
     }
@@ -377,6 +492,35 @@ export default function Reader({
     return pinyinStr;
   }
 
+  function renderSegments(items: Array<ReaderSegment | ReadingSegment>, paragraph: number, sourceSentence?: string, contextual = false) {
+    return items.map((item, index) => {
+      const isWord = item.type === "hanzi" || item.type === "word";
+      if (!isWord) return <span key={`${paragraph}-${index}`} className="whitespace-pre-wrap">{item.surface}</span>;
+      const gloss = "contextualGloss" in item ? item.contextualGloss : null;
+      const seg: ReaderSegment = { para: paragraph, seq: "seq" in item ? item.seq : index, surface: item.surface, type: "hanzi", pinyin: item.pinyin };
+      const showRt = prefs.showPinyin && !!item.pinyin && !(prefs.hideKnown && segmentFullyKnown(item.surface));
+      const syllables = item.pinyin?.trim().split(/\s+/) ?? [];
+      const chars = [...display(item.surface)];
+      const perCharLines = prefs.toneMode === "line" && showRt && chars.length > 1 && syllables.length === chars.length;
+      const dimClass = prefs.hideKnown && segmentFullyKnown(item.surface) ? "opacity-90" : "";
+      return (
+        <button
+          type="button"
+          key={`${paragraph}-${index}`}
+          className={`font-hanzi rounded transition-colors hover:bg-amber-100/70 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-500 dark:hover:bg-amber-500/15 ${dimClass}`}
+          onClick={(event) => { event.stopPropagation(); void selectWord(seg, contextual ? gloss : null, sourceSentence); }}
+          aria-label={`Look up ${item.surface}`}
+        >
+          {perCharLines ? chars.map((char, charIndex) => (
+            <ruby key={charIndex} className="hz-word">{char}<rt><ToneContour syllable={syllables[charIndex]} /></rt></ruby>
+          )) : (
+            <ruby className="hz-word">{display(item.surface)}{showRt ? <rt>{renderRt(item.pinyin as string)}</rt> : null}</ruby>
+          )}
+        </button>
+      );
+    });
+  }
+
   return (
     <main className="max-w-3xl w-full mx-auto px-4 py-8">
       <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2 mb-6">
@@ -394,7 +538,7 @@ export default function Reader({
             {hanziCount} characters · tap any word to look it up
           </p>
         </div>
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs shrink-0 select-none">
+        <div className="flex max-w-full flex-wrap items-center gap-x-4 gap-y-1.5 text-xs select-none">
           <label className="flex items-center gap-1.5 cursor-pointer">
             <input
               type="checkbox"
@@ -413,7 +557,7 @@ export default function Reader({
               onChange={(e) => setPref("hideKnown", e.target.checked)}
               className="h-3.5 w-3.5 accent-zinc-900 dark:accent-white"
             />
-            <span className="text-zinc-500 dark:text-zinc-400">藏已会 Hide known</span>
+            <span className="text-zinc-500 dark:text-zinc-400">隐藏已会辅助 Hide known help</span>
           </label>
           <div
             className="flex items-center gap-1"
@@ -453,64 +597,48 @@ export default function Reader({
         </div>
       </div>
 
+      {needsApiKey && (
+        <p className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-200" role="status">
+          Contextual analysis is off. The local reader remains available. <Link href="/settings" className="underline underline-offset-2">Add an API key in Settings</Link>.
+        </p>
+      )}
+
       <article
         className="font-hanzi text-[1.7rem] leading-[2.6rem] sm:text-[2rem] sm:leading-[3.2rem] bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 px-5 sm:px-8 py-8"
         onClick={() => setSelection(null)}
       >
-        {paragraphs.map((para, pi) => (
-          <p key={pi} className={pi > 0 ? "mt-6" : ""}>
-            {para.map((seg) => {
-              if (seg.type !== "hanzi") {
-                return (
-                  <span key={`${seg.para}-${seg.seq}`} className="whitespace-pre-wrap">
-                    {seg.surface}
-                  </span>
-                );
-              }
-              const showRt =
-                prefs.showPinyin &&
-                !!seg.pinyin &&
-                !(prefs.hideKnown && segmentFullyKnown(seg.surface));
-              const syllables = seg.pinyin?.trim().split(/\s+/) ?? [];
-              const chars = [...display(seg.surface)];
-              const perCharLines =
-                prefs.toneMode === "line" &&
-                showRt &&
-                chars.length > 1 &&
-                syllables.length === chars.length;
-              const dimClass =
-                prefs.hideKnown && segmentFullyKnown(seg.surface)
-                  ? "opacity-90"
-                  : "";
-              const clickHandler = (e: React.MouseEvent) => {
-                e.stopPropagation();
-                void selectWord(seg);
-              };
-              if (perCharLines) {
-                return chars.map((ch, ci) => (
-                  <ruby
-                    key={`${seg.para}-${seg.seq}-${ci}`}
-                    className={`hz-word cursor-pointer rounded transition-colors hover:bg-amber-100/70 dark:hover:bg-amber-500/15 ${dimClass}`}
-                    onClick={clickHandler}
-                  >
-                    {ch}
-                    <rt>{toneLineSymbol(syllables[ci]) || "\u00A0"}</rt>
-                  </ruby>
-                ));
-              }
-              return (
-                <ruby
-                  key={`${seg.para}-${seg.seq}`}
-                  className={`hz-word cursor-pointer rounded transition-colors hover:bg-amber-100/70 dark:hover:bg-amber-500/15 ${dimClass}`}
-                  onClick={clickHandler}
-                >
-                  {display(seg.surface)}
-                  {showRt ? <rt>{renderRt(seg.pinyin as string)}</rt> : null}
-                </ruby>
-              );
-            })}
-          </p>
-        ))}
+        {bodyParagraphs.map((source, paragraph) => {
+          const analysis = analyses[paragraph];
+          const status = analysisStatus[paragraph];
+          return (
+            <section key={paragraph} className={paragraph > 0 ? "mt-6" : ""} aria-label={`Paragraph ${paragraph + 1}`}>
+              {analysis ? analysis.sentences.map((sentence, sentenceIndex) => (
+                <div key={sentenceIndex} className={sentenceIndex > 0 ? "mt-3" : ""}>
+                  <p>{renderSegments(sentence.segments, paragraph, sentence.source, true)}</p>
+                  <p className="font-sans mt-1 text-sm leading-relaxed text-zinc-500 dark:text-zinc-400">{sentence.translation}</p>
+                </div>
+              )) : (
+                <p className={source ? "" : "min-h-4"}>{renderSegments(fallbackParagraphs.get(paragraph) ?? [], paragraph)}</p>
+              )}
+
+              {!analysis && source.trim() && (
+                <div className="font-sans mt-1 flex items-center gap-2 text-xs text-zinc-400" role="status">
+                  {status === "loading" && <span>Analyzing context…</span>}
+                  {status === "error" && !needsApiKey && <><span>Context analysis unavailable.</span><button type="button" className="underline underline-offset-2 hover:text-zinc-700 dark:hover:text-zinc-200" onClick={() => retryAnalysis(paragraph)}>Retry</button></>}
+                </div>
+              )}
+
+              {analysis && analysis.sentences.length > 1 && (
+                <details className="font-sans mt-2 text-sm" onToggle={(event) => { if (event.currentTarget.open) void loadParagraphTranslation(paragraph); }}>
+                  <summary className="cursor-pointer text-xs text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200">Full paragraph meaning</summary>
+                  {paragraphTranslationStatus[paragraph] === "loading" && <p className="mt-2 text-xs text-zinc-400" role="status">Translating paragraph…</p>}
+                  {paragraphTranslationStatus[paragraph] === "error" && <p className="mt-2 text-xs text-red-600 dark:text-red-400">Translation unavailable. <button type="button" className="underline" onClick={() => { setParagraphTranslationStatus((state) => { const next = { ...state }; delete next[paragraph]; return next; }); void loadParagraphTranslation(paragraph); }}>Retry</button></p>}
+                  {paragraphTranslations[paragraph] && <p className="mt-2 leading-relaxed text-zinc-600 dark:text-zinc-300">{paragraphTranslations[paragraph]}</p>}
+                </details>
+              )}
+            </section>
+          );
+        })}
       </article>
 
       {selection && (
@@ -521,6 +649,10 @@ export default function Reader({
           />
           <div
             ref={sheetRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Meaning of ${selection.surface}`}
+            tabIndex={-1}
             className="fixed z-50 bottom-0 inset-x-0 sm:inset-x-auto sm:right-6 sm:bottom-6 sm:w-96 max-h-[55vh] overflow-y-auto rounded-t-2xl sm:rounded-2xl border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 shadow-xl"
           >
             <div className="px-5 py-4">
@@ -530,8 +662,7 @@ export default function Reader({
                     {display(currentQ || selection.surface)}
                   </div>
                   <div className="text-sm text-zinc-500 dark:text-zinc-400 mt-1">
-                    {lookup?.exact?.[0]?.pinyin ??
-                      (currentQ === selection.surface ? selection.pinyin : "")}
+                    {(currentQ === selection.surface ? selection.pinyin : lookup?.exact?.[0]?.pinyin) ?? ""}
                     {lookup?.exact && lookup.exact.length > 1
                       ? ` · +${lookup.exact.length - 1} more senses`
                       : ""}
@@ -545,6 +676,13 @@ export default function Reader({
                   ✕
                 </button>
               </div>
+
+              {selection.contextualGloss && currentQ === selection.surface && (
+                <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50/70 px-3 py-2 dark:border-amber-500/20 dark:bg-amber-500/10">
+                  <div className="text-[10px] uppercase tracking-wide text-amber-700 dark:text-amber-400">Meaning here</div>
+                  <p className="mt-0.5 text-base leading-relaxed">{selection.contextualGloss}</p>
+                </div>
+              )}
 
               {ctxNgrams.length > 0 && (
                 <div className="mt-3">
@@ -571,7 +709,7 @@ export default function Reader({
                 </div>
               )}
 
-              <div className="mt-3 grid grid-cols-2 gap-2">
+              <div className={`mt-3 grid gap-2 ${selection.contextual ? "grid-cols-1" : "grid-cols-2"}`}>
                 <button
                   onClick={saveToReview}
                   disabled={savedWords.has(currentQ || selection.surface)}
@@ -581,13 +719,15 @@ export default function Reader({
                     ? "✓ 已保存 Saved"
                     : "+ 加入复习 Save"}
                 </button>
-                <button
-                  onClick={() => void translateSentence()}
-                  disabled={translating || !findSentenceFor(selection.surface)}
-                  className="rounded-lg border border-zinc-300 dark:border-zinc-600 px-3 py-1.5 text-sm font-medium hover:bg-zinc-100 dark:hover:bg-zinc-800 disabled:opacity-60 transition-colors"
-                >
-                  {translating ? "翻译中…" : "译整句 Translate"}
-                </button>
+                {!selection.contextual && (
+                  <button
+                    onClick={() => void translateSentence()}
+                    disabled={translating || !findSentenceFor(selection.surface)}
+                    className="rounded-lg border border-zinc-300 dark:border-zinc-600 px-3 py-1.5 text-sm font-medium hover:bg-zinc-100 dark:hover:bg-zinc-800 disabled:opacity-60 transition-colors"
+                  >
+                    {translating ? "翻译中…" : "译整句 Translate"}
+                  </button>
+                )}
               </div>
 
               <button
@@ -674,41 +814,24 @@ export default function Reader({
                     No dictionary entry found.
                   </p>
                 )}
-                {lookup?.exact && lookup.exact.length > 0 && (
-                  <ul className="space-y-2">
-                    {lookup.exact.map((entry, i) => (
+                {lookup && ((lookup.exact?.length ?? 0) > 0 || (lookup.related?.length ?? 0) > 0) && (
+                  <details open={!selection.contextual}>
+                    <summary className="cursor-pointer text-zinc-500 dark:text-zinc-400 text-xs uppercase tracking-wide">Dictionary meanings 词典释义</summary>
+                    {lookup.exact && lookup.exact.length > 0 && <ul className="mt-2 space-y-2">{lookup.exact.map((entry, i) => (
                       <li key={i} className="border-l-2 border-emerald-500 pl-3">
-                        <div className="text-xs text-zinc-400">
-                          {entry.traditional !== entry.simplified && `${entry.traditional} · `}
-                          {entry.pinyin}
-                        </div>
-                        {entry.defs.map((d, j) => (
-                          <div key={j} className="leading-relaxed">
-                            {d}
-                          </div>
-                        ))}
+                        <div className="text-xs text-zinc-400">{entry.traditional !== entry.simplified && `${entry.traditional} · `}{entry.pinyin}</div>
+                        {entry.defs.map((definition, j) => <div key={j} className="leading-relaxed">{definition}</div>)}
                       </li>
-                    ))}
-                  </ul>
-                )}
-                {lookup?.related && lookup.related.length > 0 && (
-                  <details open={!lookup.exact || lookup.exact.length === 0}>
-                    <summary className="cursor-pointer text-zinc-500 dark:text-zinc-400 text-xs uppercase tracking-wide">
-                      Related words 相关词
-                    </summary>
-                    <ul className="mt-2 space-y-2">
-                      {lookup.related.map(({ surface, entries }) => (
-                        <li key={surface} className="border-l-2 border-zinc-300 dark:border-zinc-700 pl-3">
-                          <span className="font-hanzi text-base font-medium">{display(surface)}</span>{" "}
-                          <span className="text-xs text-zinc-400">{entries[0]?.pinyin}</span>
-                          {entries.slice(0, 2).map((entry, j) => (
-                            <div key={j} className="text-zinc-600 dark:text-zinc-300 text-xs leading-relaxed">
-                              {entry.defs[0]}
-                            </div>
-                          ))}
+                    ))}</ul>}
+                    {lookup.related && lookup.related.length > 0 && <div className="mt-3">
+                      <div className="text-[10px] uppercase tracking-wide text-zinc-400">Related words 相关词</div>
+                      <ul className="mt-2 space-y-2">{lookup.related.map(({ surface, entries }) => (
+                        <li key={surface} className="border-l-2 border-zinc-300 pl-3 dark:border-zinc-700">
+                          <span className="font-hanzi text-base font-medium">{display(surface)}</span>{" "}<span className="text-xs text-zinc-400">{entries[0]?.pinyin}</span>
+                          {entries.slice(0, 2).map((entry, j) => <div key={j} className="text-xs leading-relaxed text-zinc-600 dark:text-zinc-300">{entry.defs[0]}</div>)}
                         </li>
-                      ))}
-                    </ul>
+                      ))}</ul>
+                    </div>}
                   </details>
                 )}
               </div>

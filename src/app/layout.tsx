@@ -30,7 +30,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     >
       <body className="min-h-full flex flex-col bg-zinc-50 dark:bg-zinc-950">
         <header className="border-b border-zinc-200 dark:border-zinc-800 bg-white/80 dark:bg-zinc-900/80 backdrop-blur sticky top-0 z-40">
-          <div className="max-w-3xl mx-auto px-4 h-14 flex items-center justify-between">
+          <div className="max-w-3xl mx-auto px-4 py-2 sm:py-0 sm:h-14 flex flex-col items-start sm:flex-row sm:items-center justify-between gap-1 sm:gap-4">
             <Link href="/" className="flex items-baseline gap-2 group">
               <span className="text-xl font-bold tracking-wide group-hover:opacity-70 transition-opacity">
                 读中文
@@ -39,7 +39,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 readChinese
               </span>
             </Link>
-            <nav className="flex items-center gap-4 text-sm">
+            <nav className="flex w-full sm:w-auto items-center gap-4 overflow-x-auto whitespace-nowrap pb-1 sm:pb-0 text-sm">
               <Link
                 href="/"
                 className="text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"

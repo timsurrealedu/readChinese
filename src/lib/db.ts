@@ -85,6 +85,17 @@ CREATE TABLE IF NOT EXISTS examples_cache (
   model TEXT,
   created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS reader_analysis_cache (
+  cache_key TEXT PRIMARY KEY,
+  text_id INTEGER NOT NULL REFERENCES texts(id) ON DELETE CASCADE,
+  paragraph_index INTEGER NOT NULL,
+  analysis_kind TEXT NOT NULL,
+  result_json TEXT NOT NULL,
+  model TEXT NOT NULL,
+  prompt_version TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_reader_analysis_text ON reader_analysis_cache (text_id, paragraph_index);
 `);
 
 const textsCols = sqlite.prepare("PRAGMA table_info(texts)").all() as {

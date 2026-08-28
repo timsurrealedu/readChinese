@@ -95,3 +95,18 @@ export const examplesCache = sqliteTable("examples_cache", {
   model: text("model"),
   createdAt: integer("created_at").notNull(),
 });
+
+export const readerAnalysisCache = sqliteTable(
+  "reader_analysis_cache",
+  {
+    cacheKey: text("cache_key").primaryKey(),
+    textId: integer("text_id").notNull().references(() => texts.id, { onDelete: "cascade" }),
+    paragraphIndex: integer("paragraph_index").notNull(),
+    analysisKind: text("analysis_kind").notNull(),
+    resultJson: text("result_json").notNull(),
+    model: text("model").notNull(),
+    promptVersion: text("prompt_version").notNull(),
+    createdAt: integer("created_at").notNull(),
+  },
+  (t) => [index("idx_reader_analysis_text").on(t.textId, t.paragraphIndex)]
+);
